@@ -32,24 +32,48 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build standard debug APK
+      - name: Restore release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::secret RELEASE_KEYSTORE_BASE64 is missing"
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > app/release.jks
+          ls -l app/release.jks
+          keytool -list -keystore app/release.jks -storepass 123456 | grep -E "antigem|Your keystore"
+
+      - name: Build signed standard release APK
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon :app:assembleStandardDebug
+          ./gradlew --no-daemon :app:assembleStandardRelease
+
+      - name: Verify APK signature
+        run: |
+          set -euo pipefail
+          APK=$(find app/build/outputs/apk/standard/release -name '*.apk' | head -1)
+          echo "APK: $APK"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          echo "apksigner: $APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee signature.txt
+          grep -q "CN=Davinci198" signature.txt
 
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find app/build/outputs/apk/standard/debug -name '*.apk' -exec cp {} output/antiGem-standard-debug.apk \;
+          find app/build/outputs/apk/standard/release -name '*.apk' -exec cp {} output/antiGem-standard-release-signed.apk \;
+          cp signature.txt output/ 2>/dev/null || true
           if [ -f app/src/main/assets/bin/agy_ide_bridge ]; then
             cp app/src/main/assets/bin/agy_ide_bridge output/agy_ide_bridge-android-arm64
           fi
+          sha256sum output/* | tee output/SHA256SUMS
           ls -lh output
 
-      - name: Upload APK and bridge
+      - name: Upload APK, bridge and certificate info
         uses: actions/upload-artifact@v4
         with:
-          name: antigem-standard
+          name: antigem-standard-signed
           path: output/*
           if-no-files-found: error
 

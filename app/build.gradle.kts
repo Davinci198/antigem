@@ -70,6 +70,11 @@ android {
 
     buildTypes {
         debug {
+            // CI restores app/release.jks from a secret. Signing debug with the same stable key
+            // means debug and release builds can update each other without uninstalling.
+            if (file("release.jks").exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         release {
             isMinifyEnabled = true
