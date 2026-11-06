@@ -1745,6 +1745,17 @@ object LocalEnvironmentManager {
             updateInstallNotification(appContext, "Installation Complete", "Termux Linux environment is verified and ready!", 100, ongoing = false, force = true)
             log("✅ Local environment ready and verified! Total space: ${getFormattedDiskSpace(appContext)}")
             LocalTerminalManager.autoLaunchServerIfReady(appContext)
+            // Install the agent CLIs (agy, claude, opencode, hermes) into the fresh container. The
+            // installer state is already Success above, so the UI stays usable while this runs and
+            // every step is streamed into the installer log. Failure here never fails the install.
+            if (!isTermuxPackage(appContext)) {
+                try {
+                    AgentProvisioner.provisionAll(appContext) { line -> log(line) }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Agent provisioning failed: ${e.message}")
+                    log("Agent tools: provisioning failed (${e.localizedMessage ?: e.message}); retrying on next start")
+                }
+            }
             return@withContext true
 
         } catch (e: Exception) {

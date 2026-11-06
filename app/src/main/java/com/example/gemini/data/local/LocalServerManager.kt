@@ -328,6 +328,8 @@ object LocalServerManager {
         // the bridge starts Claude Code through the app's launcher (--claude-bin)
         LocalEnvironmentManager.ensureGlibcEnvironment(appContext)
         LocalEnvironmentManager.ensureClaudeWrapper(appContext)
+        // a fresh container has no agent CLIs: install whatever is missing without blocking startup
+        AgentProvisioner.provisionInBackground(appContext)
 
         val command = resolveServerCommand(appContext)
         if (command == null) {

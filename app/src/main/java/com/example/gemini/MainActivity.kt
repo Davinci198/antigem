@@ -39,11 +39,45 @@ class MainActivity : ComponentActivity() {
     companion object {
         private var instanceRef: java.lang.ref.WeakReference<MainActivity>? = null
 
+        /** Process-wide: the all-files dialog is asked once, never again after returning. */
+        @Volatile
+        private var allFilesAccessAsked = false
+
         val currentInstance: MainActivity?
             get() = instanceRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
 
         fun showToast(message: String) {
             com.example.gemini.ui.components.AppToastHelper.showToast(message)
+        }
+    }
+
+    /**
+     * The manifest declares MANAGE_EXTERNAL_STORAGE, but Android 11+ never shows that dialog on its
+     * own: the app has to open the settings screen explicitly. Without it the container cannot read
+     * the shared storage (`/sdcard`) even though the permission is declared.
+     *
+     * Asked once per process: coming back from Settings without granting must not re-open it in a
+     * loop (the user can still grant it later from Settings > Apps > Special access).
+     */
+    private fun maybeRequestAllFilesAccess() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return
+        if (allFilesAccessAsked) return
+        if (com.example.gemini.data.local.LocalEnvironmentManager.isTermuxPackage(this)) return
+        if (android.os.Environment.isExternalStorageManager()) return
+        allFilesAccessAsked = true
+        val appSettings = Intent(
+            android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+            android.net.Uri.parse("package:$packageName")
+        )
+        val fallback = Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+        try {
+            startActivity(appSettings)
+        } catch (e: Exception) {
+            try {
+                startActivity(fallback)
+            } catch (ignored: Exception) {
+                android.util.Log.w("MainActivity", "All-files access settings unavailable: ${e.message}")
+            }
         }
     }
 
@@ -74,6 +108,7 @@ class MainActivity : ComponentActivity() {
         com.example.gemini.data.remote.AndroidLocalBridgeServer.instance.start(this)
         handleOAuthIntent(intent)
         handleIncomingFileIntent(intent)
+        maybeRequestAllFilesAccess()
 
         setContent {
             val initialThemeMode = remember { chatViewModel.authPreferences.getThemeModeSync() }
