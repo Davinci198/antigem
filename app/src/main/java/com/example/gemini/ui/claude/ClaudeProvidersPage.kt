@@ -19,15 +19,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Add
@@ -74,6 +78,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -104,6 +109,11 @@ import com.example.gemini.theme.QuotaRed
 import com.example.gemini.ui.components.ClaudeAccent
 
 private const val OPENROUTER_BASE_URL = "https://openrouter.ai/api"
+
+/** Model list filters for a provider after a latency scan (Mobile-Harness style). */
+private const val MODEL_FILTER_ALL = "all"
+private const val MODEL_FILTER_WORKING = "working"
+private const val MODEL_FILTER_BROKEN = "broken"
 
 /** A starting point for a popular Anthropic-compatible provider; everything stays editable (and testable) in the editor. */
 private class Preset(val label: String, val note: String, val provider: ClaudeProvider)
@@ -352,16 +362,49 @@ private fun ProviderCard(
     onScan: () -> Unit
 ) {
     val muted = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
-    var expanded by remember(p.id) { mutableStateOf(false) }
+    // Mobile-Harness style: the card collapses, and once a latency check has
+    // results only the functional models are listed by default (chips change that).
+    var collapsed by remember(p.id) { mutableStateOf(false) }
+    val probes = p.models.mapNotNull { m -> latencyFor(m.id)?.let { m.id to it } }.toMap()
+    val workingIds = probes.filterValues { it.ok }.keys
+    val brokenIds = probes.keys - workingIds
+    var filterOverride by remember(p.id) { mutableStateOf<String?>(null) }
+    val filter = filterOverride ?: if (probes.isNotEmpty()) MODEL_FILTER_WORKING else MODEL_FILTER_ALL
+    val visibleModels = when (filter) {
+        MODEL_FILTER_WORKING -> p.models.filter { it.id in workingIds }
+        MODEL_FILTER_BROKEN -> p.models.filter { it.id in brokenIds }
+        else -> p.models
+    }
+    val avgLatencyMs = probes.values.filter { it.ok && it.latency_ms > 0 }.map { it.latency_ms }
+        .takeIf { it.isNotEmpty() }?.average()
+
     ClaudeCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.clickable { collapsed = !collapsed }
+        ) {
+            Icon(
+                if (collapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
+                if (collapsed) "Expand" else "Collapse",
+                tint = muted, modifier = Modifier.size(22.dp)
+            )
+            Spacer(Modifier.width(6.dp))
             Column(Modifier.weight(1f)) {
                 Text(p.name, fontWeight = FontWeight.Bold, fontSize = 14.5.sp)
                 Text(p.base_url, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (probes.isNotEmpty()) {
+                    Text(
+                        "${workingIds.size} of ${p.models.size} answered" +
+                            (avgLatencyMs?.let { " · %.1fs avg".format(it / 1000.0) } ?: ""),
+                        fontSize = 10.5.sp, color = muted
+                    )
+                }
             }
             IconButton(onClick = onEdit) { Icon(Icons.Outlined.Edit, "Edit") }
             IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "Remove", tint = QuotaRed.copy(alpha = 0.8f)) }
         }
+        if (collapsed) return@ClaudeCard
+
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onAddKey) {
                 Icon(Icons.Outlined.Key, null, Modifier.size(16.dp), tint = ClaudeAccent)
@@ -379,32 +422,77 @@ private fun ProviderCard(
             if (p.disable_betas) Badge("no betas")
         }
         Spacer(Modifier.size(8.dp))
-        Text("Models (${p.models.size})", fontWeight = FontWeight.SemiBold, fontSize = 12.5.sp)
+
+        if (probes.isNotEmpty() || scanning) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatCard("Working", workingIds.size.toString(), QuotaGreen, Modifier.weight(1f))
+                StatCard("Broken", brokenIds.size.toString(), QuotaRed, Modifier.weight(1f))
+                StatCard("Avg time", avgLatencyMs?.let { "%.1fs".format(it / 1000.0) } ?: "–", muted, Modifier.weight(1f))
+            }
+            Spacer(Modifier.size(8.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                mapOf(
+                    MODEL_FILTER_ALL to "All",
+                    MODEL_FILTER_WORKING to "Working",
+                    MODEL_FILTER_BROKEN to "Broken"
+                ).forEach { (key, label) ->
+                    FilterChip(
+                        selected = filter == key,
+                        onClick = { filterOverride = key },
+                        label = { Text(label, fontSize = 11.5.sp) }
+                    )
+                }
+            }
+            Spacer(Modifier.size(6.dp))
+        }
+
+        Text("MODELS · ${visibleModels.size}", fontWeight = FontWeight.SemiBold, fontSize = 11.sp, color = muted)
         if (p.models.isEmpty()) {
             Text("None yet: open Edit to add model ids or fetch the provider's list.", fontSize = 11.5.sp, color = muted)
+        } else if (visibleModels.isEmpty()) {
+            Text(
+                if (filter == MODEL_FILTER_WORKING) "No model answered the last check. Use the Broken filter or run Check latency again."
+                else "Nothing matches this filter.",
+                fontSize = 11.5.sp, color = muted
+            )
         }
-        (if (expanded) p.models else p.models.take(5)).forEach { m ->
+        visibleModels.forEach { m ->
             val probe = latencyFor(m.id)
-            Column(Modifier.padding(vertical = 3.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(m.name?.takeIf { it.isNotBlank() } ?: m.id, fontSize = 13.sp)
-                    probe?.let { LatencyBadge(it) }
-                    if (m.id == fastestModel && probe?.ok == true) {
-                        Spacer(Modifier.width(6.dp))
-                        Text("fastest", fontSize = 10.sp, color = QuotaGreen)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(vertical = 4.dp)
+            ) {
+                LatencyPill(probe)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(m.name?.takeIf { it.isNotBlank() } ?: m.id, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (m.id == fastestModel && probe?.ok == true) {
+                            Spacer(Modifier.width(6.dp))
+                            Text("fastest", fontSize = 10.sp, color = QuotaGreen)
+                        }
                     }
+                    Text(
+                        listOfNotNull(m.id.takeIf { !m.name.isNullOrBlank() }, m.contextLabel(p) ?: "context unknown", m.thinkingLabel(p)).joinToString(" · "),
+                        fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
                 }
-                Text(
-                    listOfNotNull(m.id.takeIf { !m.name.isNullOrBlank() }, m.contextLabel(p) ?: "context unknown", m.thinkingLabel(p)).joinToString(" · "),
-                    fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, color = muted
+                Box(
+                    Modifier
+                        .padding(start = 8.dp)
+                        .size(9.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                probe == null -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                                probe.ok -> QuotaGreen
+                                else -> QuotaRed
+                            }
+                        )
                 )
             }
         }
-        if (p.models.size > 5) {
-            TextButton(onClick = { expanded = !expanded }) {
-                Text(if (expanded) "Show fewer" else "Show all ${p.models.size}", color = ClaudeAccent, fontSize = 12.sp)
-            }
-        }
+
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(enabled = !testing, onClick = onTest) {
                 Icon(Icons.Outlined.NetworkCheck, null, Modifier.size(16.dp), tint = ClaudeAccent)
@@ -423,20 +511,47 @@ private fun ProviderCard(
     }
 }
 
+/** One scan-summary figure of a provider card (working / broken / average time). */
+@Composable
+private fun StatCard(label: String, value: String, dot: Color, modifier: Modifier = Modifier) {
+    val muted = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = modifier
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(dot))
+                Spacer(Modifier.width(6.dp))
+                Text(label, fontSize = 10.5.sp, color = muted)
+            }
+            Spacer(Modifier.size(4.dp))
+            Text(value, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+    }
+}
+
 /** Answer time of one model from the last latency check: green when it answered, red when it did not. */
 @Composable
-private fun LatencyBadge(r: ClaudeProviderTestResult) {
+private fun LatencyPill(r: ClaudeProviderTestResult?) {
     val (color, label) = when {
-        r.ok -> QuotaGreen to "${r.latency_ms} ms"
+        r == null -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f) to "–"
+        r.ok -> QuotaGreen to "%.1fs".format(r.latency_ms / 1000.0)
         r.status in 400..599 -> QuotaRed to "HTTP ${r.status}"
         r.error.contains("timeout", ignoreCase = true) -> QuotaAmber to "timeout"
         else -> QuotaRed to "failed"
     }
-    Spacer(Modifier.width(6.dp))
-    Text(
-        label, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, color = color,
-        modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(color.copy(alpha = 0.12f)).padding(horizontal = 6.dp, vertical = 2.dp)
-    )
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .widthIn(min = 52.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(color.copy(alpha = 0.14f))
+            .padding(horizontal = 7.dp, vertical = 4.dp)
+    ) {
+        Text(label, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, color = color)
+    }
 }
 
 @Composable
@@ -1499,7 +1614,7 @@ private fun QuickAddProviderDialog(backend: ClaudeChatBackend, onDismiss: () -> 
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(m.name?.takeIf { it.isNotBlank() } ?: m.id, fontSize = 12.5.sp, modifier = Modifier.weight(1f))
-                            probe?.let { LatencyBadge(it) }
+                            LatencyPill(probe)
                             Spacer(Modifier.width(6.dp))
                             RadioButton(selected = picked == m.id, onClick = { picked = m.id })
                         }
