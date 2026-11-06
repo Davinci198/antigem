@@ -355,6 +355,14 @@ object AgentProvisioner {
               apt-get update -qq
               DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git curl ca-certificates libatomic1
             fi
+            # uv refuses to hardlink on this filesystem (proot on f2fs); copy mode
+            # is what Mobile-Harness uses for the same installer.
+            export UV_LINK_MODE=copy
+            mkdir -p /etc/uv
+            printf 'link-mode = "copy"\n' > /etc/uv/uv.toml
+            rm -f /var/lib/apt/lists/lock /var/lib/apt/lists/partial/.lock \
+              /var/cache/apt/archives/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>/dev/null || true
+            dpkg --configure -a 2>/dev/null || true
             mkdir -p $GUEST_DOWNLOAD_DIR
             curl -fsSL $HERMES_INSTALL_URL -o $GUEST_DOWNLOAD_DIR/hermes-install.sh
             # --non-interactive keeps the installer away from /dev/tty (no prompts, no setup stage);
