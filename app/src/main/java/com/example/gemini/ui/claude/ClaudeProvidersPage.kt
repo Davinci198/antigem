@@ -671,6 +671,11 @@ private fun ProviderEditor(
                         OutlinedTextField(
                             key, { key = it }, label = { Text("API key") }, singleLine = true,
                             placeholder = { Text(if (isNew) "sk-…" else "unchanged (${initial.api_key_hint ?: "saved"})") },
+                            supportingText = {
+                                if (!isNew && initial.api_key_hint != null && key.isBlank()) {
+                                    Text("A key ending in ${initial.api_key_hint} is already saved. Type here only to replace it.", fontSize = 10.5.sp, color = muted)
+                                }
+                            },
                             visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
                         )
                         Text("How the key is sent", fontSize = 12.sp, color = muted)
