@@ -37,7 +37,9 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.NetworkCheck
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
@@ -154,6 +156,10 @@ fun ProvidersPage(deps: ClaudeSettingsDeps) {
     var restarting by remember { mutableStateOf(false) }
     val testing = remember { mutableStateMapOf<String, Boolean>() }
     val results = remember { mutableStateMapOf<String, ClaudeProviderTestResult>() }
+    var keyFor by remember { mutableStateOf<ClaudeProvider?>(null) }
+    val scanning = remember { mutableStateMapOf<String, Boolean>() }
+    val latency = remember { mutableStateMapOf<String, ClaudeProviderTestResult>() }
+    val latencyFastest = remember { mutableStateMapOf<String, String>() }
     LaunchedEffect(Unit) { backend.refreshProviders() }
     val muted = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
 
@@ -211,14 +217,41 @@ fun ProvidersPage(deps: ClaudeSettingsDeps) {
             p = p,
             testing = testing[p.id] == true,
             result = results[p.id],
+            scanning = scanning[p.id] == true,
+            latencyFor = { m -> latency["${p.id}@$m"] },
+            fastestModel = latencyFastest[p.id],
             onEdit = { editing = p },
             onDelete = { toDelete = p },
+            onAddKey = { keyFor = p },
             onTest = {
                 testing[p.id] = true
                 results.remove(p.id)
                 backend.testProvider(p, p.models.firstOrNull()?.id.orEmpty()) { res ->
                     testing[p.id] = false
                     results[p.id] = res
+                }
+            },
+            onScan = {
+                if (p.models.isEmpty()) {
+                    Toast.makeText(context, "No models yet: open Edit to add model ids or fetch the provider's list.", Toast.LENGTH_LONG).show()
+                } else {
+                    scanning[p.id] = true
+                    latencyFastest.remove(p.id)
+                    latency.keys.removeAll { it.startsWith("${p.id}@") }
+                    backend.scanProviderLatency(
+                        p, p.models,
+                        onProgress = { model, res -> latency["${p.id}@$model"] = res },
+                        onFinished = { answered, fastest ->
+                            scanning[p.id] = false
+                            if (fastest != null) latencyFastest[p.id] = fastest.model
+                            val msg = if (answered == 0) {
+                                "No model answered (check the API key)"
+                            } else {
+                                "$answered of ${p.models.size} answered" + (fastest?.let { " · fastest ${it.latency_ms} ms" } ?: "")
+                            }
+                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                        }
+                    )
                 }
             }
         )
@@ -237,6 +270,8 @@ fun ProvidersPage(deps: ClaudeSettingsDeps) {
             }
         }
     }
+
+    keyFor?.let { p -> ProviderKeyDialog(p, backend, onDismiss = { keyFor = null }, onSaved = { savedProvider = it }) }
 
     savedProvider?.let { p ->
         AlertDialog(
@@ -284,9 +319,14 @@ private fun ProviderCard(
     p: ClaudeProvider,
     testing: Boolean,
     result: ClaudeProviderTestResult?,
+    scanning: Boolean,
+    latencyFor: (String) -> ClaudeProviderTestResult?,
+    fastestModel: String?,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    onTest: () -> Unit
+    onAddKey: () -> Unit,
+    onTest: () -> Unit,
+    onScan: () -> Unit
 ) {
     val muted = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
     var expanded by remember(p.id) { mutableStateOf(false) }
@@ -299,8 +339,15 @@ private fun ProviderCard(
             IconButton(onClick = onEdit) { Icon(Icons.Outlined.Edit, "Edit") }
             IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "Remove", tint = QuotaRed.copy(alpha = 0.8f)) }
         }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onAddKey) {
+                Icon(Icons.Outlined.Key, null, Modifier.size(16.dp), tint = ClaudeAccent)
+                Spacer(Modifier.width(6.dp))
+                Text(if (p.api_key_hint == null) "Add key" else "Replace key", color = ClaudeAccent)
+            }
+            if (p.api_key_hint != null) Badge("Key ${p.api_key_hint}")
+        }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            p.api_key_hint?.let { Badge("Key $it") }
             Badge(if (p.auth_mode == "x-api-key") "x-api-key" else "Bearer token")
             Badge(if (p.thinking_budget > 0) "Thinking ${tokenLabel(p.thinking_budget.toLong())}" else "No thinking budget")
             if (p.headers.isNotEmpty()) Badge("${p.headers.size} header${if (p.headers.size == 1) "" else "s"}")
@@ -314,8 +361,16 @@ private fun ProviderCard(
             Text("None yet: open Edit to add model ids or fetch the provider's list.", fontSize = 11.5.sp, color = muted)
         }
         (if (expanded) p.models else p.models.take(5)).forEach { m ->
+            val probe = latencyFor(m.id)
             Column(Modifier.padding(vertical = 3.dp)) {
-                Text(m.name?.takeIf { it.isNotBlank() } ?: m.id, fontSize = 13.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(m.name?.takeIf { it.isNotBlank() } ?: m.id, fontSize = 13.sp)
+                    probe?.let { LatencyBadge(it) }
+                    if (m.id == fastestModel && probe?.ok == true) {
+                        Spacer(Modifier.width(6.dp))
+                        Text("fastest", fontSize = 10.sp, color = QuotaGreen)
+                    }
+                }
                 Text(
                     listOfNotNull(m.id.takeIf { !m.name.isNullOrBlank() }, m.contextLabel(p) ?: "context unknown", m.thinkingLabel(p)).joinToString(" · "),
                     fontSize = 10.5.sp, fontFamily = FontFamily.Monospace, color = muted
@@ -334,9 +389,31 @@ private fun ProviderCard(
                 Text("Test connection", color = ClaudeAccent)
             }
             if (testing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = ClaudeAccent)
+            TextButton(enabled = !scanning, onClick = onScan) {
+                Icon(Icons.Outlined.Speed, null, Modifier.size(16.dp), tint = ClaudeAccent)
+                Spacer(Modifier.width(6.dp))
+                Text(if (scanning) "Measuring…" else "Check latency", color = ClaudeAccent)
+            }
+            if (scanning) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = ClaudeAccent)
         }
         result?.let { TestResultView(it) }
     }
+}
+
+/** Answer time of one model from the last latency check: green when it answered, red when it did not. */
+@Composable
+private fun LatencyBadge(r: ClaudeProviderTestResult) {
+    val (color, label) = when {
+        r.ok -> QuotaGreen to "${r.latency_ms} ms"
+        r.status in 400..599 -> QuotaRed to "HTTP ${r.status}"
+        r.error.contains("timeout", ignoreCase = true) -> QuotaAmber to "timeout"
+        else -> QuotaRed to "failed"
+    }
+    Spacer(Modifier.width(6.dp))
+    Text(
+        label, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, color = color,
+        modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(color.copy(alpha = 0.12f)).padding(horizontal = 6.dp, vertical = 2.dp)
+    )
 }
 
 @Composable
@@ -1180,5 +1257,51 @@ private fun ModelsMappingDialog(
                 TextButton(onClick = onDismiss) { Text("Cancel") }
             }
         }
+    )
+}
+
+/**
+ * Adds or replaces the API key of one provider without opening the whole editor. A blank field keeps the saved key,
+ * so "Cancel" and "Save" never destroy it by accident.
+ */
+@Composable
+private fun ProviderKeyDialog(p: ClaudeProvider, backend: ClaudeChatBackend, onDismiss: () -> Unit, onSaved: (ClaudeProvider) -> Unit) {
+    val context = LocalContext.current
+    var key by remember(p.id) { mutableStateOf("") }
+    var saving by remember(p.id) { mutableStateOf(false) }
+    var error by remember(p.id) { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = { if (!saving) onDismiss() },
+        title = { Text(if (p.api_key_hint == null) "Add the API key" else "Replace the API key") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("For ${p.name} (${p.base_url}).", fontSize = 12.sp)
+                if (p.api_key_hint != null) Text("A key ending in ${p.api_key_hint} is saved and will be used until you replace it.", fontSize = 11.5.sp, color = QuotaAmber)
+                OutlinedTextField(
+                    key, { key = it }, label = { Text("API key") }, singleLine = true,
+                    placeholder = { Text("sk-…") }, modifier = Modifier.fillMaxWidth(), visualTransformation = PasswordVisualTransformation()
+                )
+                Text("The key is sent to the bridge, never to a chat. Providers without a key are allowed (local gateways).", fontSize = 10.5.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f))
+                error?.let { Text(it, fontSize = 11.5.sp, color = QuotaRed) }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !saving && key.isNotBlank(), onClick = {
+                saving = true
+                error = null
+                backend.saveProvider(p.copy(api_key = key.trim())) { err ->
+                    saving = false
+                    if (err == null) {
+                        Toast.makeText(context, "Key saved", Toast.LENGTH_SHORT).show()
+                        onDismiss()
+                        // running chats keep the key they started with
+                        onSaved(p)
+                    } else {
+                        error = err
+                    }
+                }
+            }) { Text(if (saving) "Saving…" else "Save key", color = ClaudeAccent) }
+        },
+        dismissButton = { TextButton(enabled = !saving, onClick = onDismiss) { Text("Cancel") } }
     )
 }

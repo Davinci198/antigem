@@ -18,12 +18,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
@@ -135,6 +140,8 @@ class ClaudeChatBackend(
     val settingsConflicts: StateFlow<List<String>> = _settingsConflicts.asStateFlow()
     private val _providers = MutableStateFlow<List<ClaudeProvider>>(emptyList())
     val providers: StateFlow<List<ClaudeProvider>> = _providers.asStateFlow()
+    /** A running latency scan per provider id; a second tap while it runs is ignored. */
+    private val latencyScans = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     private val _settingsEndpoint = MutableStateFlow<String?>(null)
     /** settings.json sends every chat to this endpoint (offered for moving into a provider). */
@@ -988,6 +995,53 @@ class ClaudeChatBackend(
         }
     }
 
+    /**
+     * Measures the answering latency of every model of [provider], a few at a time so a slow gateway is not
+     * hammered. [onProgress] fires once per finished model, [onFinished] with the number that answered and the
+     * fastest answer (null when none did). Only one scan per provider runs at a time.
+     */
+    fun scanProviderLatency(
+        provider: ClaudeProvider,
+        models: List<ClaudeProviderModel>,
+        onProgress: (modelId: String, result: ClaudeProviderTestResult) -> Unit,
+        onFinished: (answered: Int, fastest: ClaudeProviderTestResult?) -> Unit,
+    ) {
+        if (models.isEmpty()) {
+            onFinished(0, null)
+            return
+        }
+        if (latencyScans[provider.id]?.isActive == true) return
+        latencyScans[provider.id] = backendScope.launch {
+            try {
+                val permits = Semaphore(LATENCY_SCAN_CONCURRENCY)
+                val answered = java.util.concurrent.atomic.AtomicInteger(0)
+                val fastest = java.util.concurrent.atomic.AtomicReference<ClaudeProviderTestResult?>(null)
+                coroutineScope {
+                    models.map { model ->
+                        async {
+                            permits.withPermit {
+                                val res = client.testProvider(provider, model.id).fold(
+                                    { it.result ?: ClaudeProviderTestResult(error = it.error ?: "the bridge gave no answer") },
+                                    { ClaudeProviderTestResult(error = it.message ?: "the bridge is not reachable") }
+                                )
+                                if (res.ok) {
+                                    answered.incrementAndGet()
+                                    val current = fastest.get()
+                                    if (current == null || res.latency_ms < current.latency_ms) fastest.set(res)
+                                }
+                                withContext(Dispatchers.Main) { onProgress(model.id, res) }
+                            }
+                        }
+                    }.awaitAll()
+                }
+                withContext(Dispatchers.Main) { onFinished(answered.get(), fastest.get()) }
+            } finally {
+                // even a cancelled scan must free the slot, or a later tap is silently ignored
+                latencyScans.remove(provider.id)
+            }
+        }
+    }
+
     fun importSettingsProvider(onDone: (String?) -> Unit = {}) {
         backendScope.launch {
             val err = client.importSettingsProvider().fold({ if (it.success) null else it.error ?: "the bridge refused" }, { it.message ?: "failed" })
@@ -1533,6 +1587,9 @@ class ClaudeChatBackend(
 
     companion object {
         private const val TAG = "ClaudeChatBackend"
+
+        /** How many latency probes run at the same time during a provider scan. */
+        private const val LATENCY_SCAN_CONCURRENCY = 3
 
         /** The provider id of a custom model ("@openrouter/x" → "openrouter"), "" for Claude's own models. */
         fun providerOf(modelId: String): String = if (modelId.startsWith("@")) modelId.drop(1).substringBefore('/') else ""
