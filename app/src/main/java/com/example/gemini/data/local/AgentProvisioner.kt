@@ -387,9 +387,13 @@ object AgentProvisioner {
             # the uv child env dropping every UV_* setting, while redirecting XDG_CONFIG_HOME
             # to an empty temp dir. /etc/uv/uv.toml is the one config uv still reads there,
             # and --link2symlink turns the leftover link(2) failures into copy-mode installs.
+            # Only stage banners and the failure cause are streamed: sweeping all of
+            # apt's output into the app log buries the one line that matters. The
+            # unfiltered transcript goes to a file so a failed run stays diagnosable.
             run_installer() {
               bash $GUEST_DOWNLOAD_DIR/hermes-install.sh --non-interactive --skip-browser --skip-computer-use < /dev/null 2>&1 \
-                | tr '\r' '\n' | grep --line-buffered -E '^(==>|\[|✔|✖|⚠|Error|error|Fatal|fatal)'
+                | tr '\r' '\n' | tee -a /sdcard/Download/hermes-full.log \
+                | grep --line-buffered -iE '^(==>|\[|✔|✖|⚠)|error|caused by|failed|traceback'
               return "${'$'}{PIPESTATUS[0]}"
             }
             set +e
