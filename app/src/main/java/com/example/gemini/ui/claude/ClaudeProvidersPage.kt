@@ -96,6 +96,7 @@ import com.example.gemini.data.agent.claude.ClaudeProviderTestResult
 import com.example.gemini.data.agent.claude.contextLabel
 import com.example.gemini.data.agent.claude.limitsOf
 import com.example.gemini.data.agent.claude.thinkingLabel
+import com.example.gemini.data.agent.claude.normaliseBaseUrl
 import com.example.gemini.data.agent.claude.tokenLabel
 import com.example.gemini.theme.QuotaAmber
 import com.example.gemini.theme.QuotaGreen
