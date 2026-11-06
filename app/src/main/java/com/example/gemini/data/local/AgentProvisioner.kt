@@ -392,10 +392,16 @@ object AgentProvisioner {
             # twice: once after the clone (so the very first sync is covered) and
             # again after the install (in case a stage refreshed the checkout).
             patch_pm_uv() {
-              for f in /root/.hermes/hermes-agent/pm/environment.py /usr/local/lib/hermes-agent/pm/environment.py; do
-                [ -f "${'$'}f" ] || continue
-                sed -i 's/"--compile-bytecode"\]/"--compile-bytecode", "--link-mode", "copy"]/' "${'$'}f" || true
-                sed -i 's/"pip", "install", "--no-config"/"pip", "install", "--no-config", "--link-mode", "copy"/' "${'$'}f" || true
+              for d in /root/.hermes/hermes-agent /usr/local/lib/hermes-agent; do
+                [ -f "${'$'}d/pm/environment.py" ] || continue
+                # A previous run's patch may have hit both `"--compile-bytecode"]`
+                # occurrences (the sync command and the fallback comprehension) and
+                # left the file unparseable, so restore the checkout first.
+                if [ -d "${'$'}d/.git" ]; then
+                  git -C "${'$'}d" checkout -- pm/environment.py 2>/dev/null || true
+                fi
+                python3 -c 'import sys,pathlib;p=pathlib.Path(sys.argv[1]);s=p.read_text();s=s.replace("arg != \"--compile-bytecode\", \"--link-mode\", \"copy\"]","arg != \"--compile-bytecode\"]").replace(", \"--compile-bytecode\"]", ", \"--compile-bytecode\", \"--link-mode\", \"copy\"]").replace("\"pip\", \"install\", \"--no-config\"", "\"pip\", \"install\", \"--no-config\", \"--link-mode\", \"copy\"");p.write_text(s)' "${'$'}d/pm/environment.py" 2>/dev/null || true
+                python3 -c 'import sys,ast;ast.parse(open(sys.argv[1]).read())' "${'$'}d/pm/environment.py" 2>/dev/null || echo "warning: ${'$'}d/pm/environment.py did not parse after patching"
               done
             }
             # Only stage banners and the failure cause are streamed: sweeping all of
