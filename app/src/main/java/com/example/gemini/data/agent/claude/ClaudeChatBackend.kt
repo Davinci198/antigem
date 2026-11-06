@@ -936,6 +936,17 @@ class ClaudeChatBackend(
         }
     }
 
+    /** Saves a new provider and hands back the stored one (with the id the bridge assigned). */
+    fun addProvider(provider: ClaudeProvider, onDone: (ClaudeProvider?, String?) -> Unit) {
+        backendScope.launch {
+            val res = client.saveProvider(provider)
+            val saved = res.getOrNull()?.takeIf { it.success }?.provider
+            val err = res.exceptionOrNull()?.message ?: res.getOrNull()?.error ?: if (saved == null) "the bridge refused" else null
+            if (err == null) refreshProviders()
+            withContext(Dispatchers.Main) { onDone(saved, err) }
+        }
+    }
+
     fun deleteProvider(id: String) {
         backendScope.launch {
             client.deleteProvider(id).onFailure { _controlMessages.tryEmit("Cannot remove the provider: ${it.message}") }
@@ -981,6 +992,44 @@ class ClaudeChatBackend(
                     { ClaudeFetchOutcome(error = it.message ?: "the bridge is not reachable") }
                 )
             )
+        }
+    }
+
+    /**
+     * Finds the model list of a bare base URL: tries `<origin>/v1/models`, `<base>/models` and `<base>/v1/models`
+     * and stops at the first one that actually lists models. This is what the quick add needs, because there the
+     * user only pasted an endpoint. [onResult] gets the models, the URL that worked, or the last failure.
+     */
+    fun detectFormModels(
+        baseUrl: String,
+        apiKey: String,
+        onResult: (models: List<ClaudeProviderModel>, modelsUrl: String?, error: String?) -> Unit,
+    ) {
+        backendScope.launch {
+            val base = baseUrl.trim().trimEnd('/')
+            if (base.isEmpty()) {
+                onResult(emptyList(), null, "enter the base URL first")
+                return@launch
+            }
+            val origin = runCatching { java.net.URI(base) }.getOrNull()
+                ?.takeIf { !it.authority.isNullOrBlank() }
+                ?.let { "${it.scheme}://${it.authority}" }
+            val candidates = listOfNotNull(origin?.let { "$it/v1/models" }, "$base/models", "$base/v1/models").distinct()
+            var lastError: String? = null
+            for (candidate in candidates) {
+                val draft = ClaudeProvider(base_url = base, api_key = apiKey, models_url = candidate)
+                val response = client.fetchFormModels(draft, false)
+                val outcome = response.getOrNull()
+                if (outcome != null && outcome.success && outcome.models.isNotEmpty()) {
+                    onResult(outcome.models, candidate, null)
+                    return@launch
+                }
+                lastError = response.exceptionOrNull()?.message
+                    ?: outcome?.error
+                    ?: outcome?.raw?.status?.takeIf { it > 0 }?.let { "HTTP $it from $candidate" }
+                    ?: "no models read from $candidate"
+            }
+            onResult(emptyList(), null, lastError ?: "no models found")
         }
     }
 

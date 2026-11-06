@@ -28,6 +28,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
@@ -55,6 +57,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -157,6 +160,7 @@ fun ProvidersPage(deps: ClaudeSettingsDeps) {
     val testing = remember { mutableStateMapOf<String, Boolean>() }
     val results = remember { mutableStateMapOf<String, ClaudeProviderTestResult>() }
     var keyFor by remember { mutableStateOf<ClaudeProvider?>(null) }
+    var quickAdd by remember { mutableStateOf(false) }
     val scanning = remember { mutableStateMapOf<String, Boolean>() }
     val latency = remember { mutableStateMapOf<String, ClaudeProviderTestResult>() }
     val latencyFastest = remember { mutableStateMapOf<String, String>() }
@@ -197,9 +201,15 @@ fun ProvidersPage(deps: ClaudeSettingsDeps) {
 
     // quick start
     Text("Add a provider", fontWeight = FontWeight.SemiBold, fontSize = 12.5.sp)
+    OutlinedButton(onClick = { quickAdd = true }, modifier = Modifier.fillMaxWidth()) {
+        Icon(Icons.Outlined.Add, null, Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
+        Text("Custom endpoint · detect its models")
+    }
+    Text("or start from a known one", fontSize = 11.sp, color = muted)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         PRESETS.filter { it.label != "OpenRouter" || providers.none { p -> p.openrouter } }.forEach { preset ->
-            OutlinedButton(onClick = { editing = preset.provider }) { Text(if (preset.label == "Custom") "+ Custom" else "+ ${preset.label}") }
+            OutlinedButton(onClick = { editing = preset.provider }) { Text(if (preset.label == "Custom") "+ Custom (full form)" else "+ ${preset.label}") }
         }
     }
 
@@ -272,6 +282,18 @@ fun ProvidersPage(deps: ClaudeSettingsDeps) {
     }
 
     keyFor?.let { p -> ProviderKeyDialog(p, backend, onDismiss = { keyFor = null }, onSaved = { savedProvider = it }) }
+
+    if (quickAdd) {
+        QuickAddProviderDialog(backend, onDismiss = { quickAdd = false }) { saved, modelId ->
+            quickAdd = false
+            // a chat that has not started yet can move to the new provider straight away
+            if (backend.messages.value.isEmpty()) {
+                backend.selectModel("@${saved.id}/$modelId")
+            } else {
+                savedProvider = saved
+            }
+        }
+    }
 
     savedProvider?.let { p ->
         AlertDialog(
@@ -1303,5 +1325,216 @@ private fun ProviderKeyDialog(p: ClaudeProvider, backend: ClaudeChatBackend, onD
             }) { Text(if (saving) "Saving…" else "Save key", color = ClaudeAccent) }
         },
         dismissButton = { TextButton(enabled = !saving, onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+// ---------------------------------------------------------------- quick add
+
+/** "api.moonshot.ai" → "moonshot", "localhost:8080" → "localhost": a name the user can keep or change. */
+private fun providerNameOf(url: String): String {
+    val host = url.trim().removePrefix("https://").removePrefix("http://").substringBefore('/').substringBefore(':')
+    val cleaned = host.removePrefix("www.").removePrefix("api.").ifBlank { host }
+    return cleaned.substringBefore('.').replaceFirstChar { it.uppercase() }
+}
+
+private fun isLoopbackHost(url: String): Boolean {
+    val host = url.trim().removePrefix("https://").removePrefix("http://").substringBefore('/').substringBefore(':')
+    return host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1" || host.endsWith(".local")
+}
+
+/**
+ * Quick add for a custom endpoint: paste the base URL, detect what the endpoint serves, pick a model, add the key.
+ * It ends in the same saved-provider prompt as the full editor, so the chats already running can move over.
+ */
+@Composable
+private fun QuickAddProviderDialog(backend: ClaudeChatBackend, onDismiss: () -> Unit, onSaved: (ClaudeProvider, String) -> Unit) {
+    val context = LocalContext.current
+    var baseUrl by remember { mutableStateOf("https://") }
+    var key by remember { mutableStateOf("") }
+    var keyVisible by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    var nameTouched by remember { mutableStateOf(false) }
+    var authMode by remember { mutableStateOf("bearer") }
+    var detecting by remember { mutableStateOf(false) }
+    var models by remember { mutableStateOf<List<ClaudeProviderModel>>(emptyList()) }
+    var modelsUrl by remember { mutableStateOf<String?>(null) }
+    var picked by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    var probing by remember { mutableStateOf(false) }
+    val probes = remember { mutableStateMapOf<String, ClaudeProviderTestResult>() }
+
+    val trimmed = baseUrl.trim()
+    val hasScheme = trimmed.startsWith("http://") || trimmed.startsWith("https://")
+    val badScheme = trimmed.contains("://") && !hasScheme
+    val usableUrl = when {
+        trimmed.isBlank() || badScheme -> ""
+        hasScheme -> trimmed
+        else -> "http://$trimmed"
+    }
+    val needsKey = usableUrl.isNotBlank() && !isLoopbackHost(usableUrl)
+    val hostOk = usableUrl.removePrefix("https://").removePrefix("http://").isNotBlank()
+    val canDetect = hostOk && !detecting && (key.isNotBlank() || !needsKey)
+    val preview = if (usableUrl.isBlank()) "" else usableUrl.trimEnd('/') + "/v1/messages"
+
+    fun probe(vararg modelIds: String) {
+        val draft = ClaudeProvider(
+            name = name.ifBlank { providerNameOf(usableUrl) }, base_url = usableUrl,
+            api_key = key.trim(), auth_mode = authMode
+        )
+        probing = true
+        var left = modelIds.size
+        for (id in modelIds) {
+            backend.testProvider(draft, id) { res ->
+                probes[id] = res
+                left--
+                if (left <= 0) probing = false
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!saving && !detecting) onDismiss() },
+        title = { Text("Add a custom provider") },
+        text = {
+            Column(
+                Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "Any endpoint that speaks the Anthropic Messages API. Paste its base URL and let the app list its models.",
+                    fontSize = 12.sp
+                )
+                OutlinedTextField(
+                    baseUrl, {
+                        baseUrl = it
+                        error = null
+                        models = emptyList()
+                        modelsUrl = null
+                        picked = ""
+                        probes.clear()
+                        if (!nameTouched) name = providerNameOf("http://$it")
+                    },
+                    label = { Text("Base URL") }, singleLine = true,
+                    placeholder = { Text("https://api.example.com/anthropic") },
+                    isError = badScheme, modifier = Modifier.fillMaxWidth(),
+                    supportingText = {
+                        Text(
+                            when {
+                                badScheme -> "The scheme must be http or https"
+                                trimmed.isNotBlank() && !hasScheme -> "http:// will be added"
+                                preview.isNotBlank() -> "Chats will POST $preview"
+                                else -> "Claude Code calls <base URL>/v1/messages"
+                            },
+                            fontSize = 10.5.sp
+                        )
+                    }
+                )
+                OutlinedTextField(
+                    key, { key = it; error = null }, label = { Text(if (needsKey) "API key" else "API key (not needed here)") },
+                    singleLine = true, placeholder = { Text("sk-…") },
+                    visualTransformation = if (keyVisible) androidx.compose.ui.text.input.VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { keyVisible = !keyVisible }) {
+                            Icon(if (keyVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility, "Show the key", Modifier.size(18.dp))
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    listOf("bearer" to "Bearer", "x-api-key" to "x-api-key").forEach { (mode, label) ->
+                        FilterChip(
+                            selected = authMode == mode, onClick = { authMode = mode; error = null },
+                            label = { Text(label, fontSize = 11.sp) },
+                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = ClaudeAccent.copy(alpha = 0.2f))
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(enabled = canDetect, onClick = {
+                        detecting = true
+                        error = null
+                        models = emptyList()
+                        probes.clear()
+                        backend.detectFormModels(usableUrl, key.trim()) { found, listUrl, err ->
+                            detecting = false
+                            models = found
+                            modelsUrl = listUrl
+                            if (found.isNotEmpty()) {
+                                picked = found.first().id
+                                if (!nameTouched && name.isBlank()) name = providerNameOf(usableUrl)
+                            } else {
+                                error = err ?: "no models found"
+                            }
+                        }
+                    }) {
+                        if (detecting) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = ClaudeAccent)
+                        else Icon(Icons.Outlined.CloudDownload, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (detecting) "Detecting…" else "Detect models")
+                    }
+                    if (models.isNotEmpty()) {
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(enabled = !probing, onClick = { probe(*models.map { it.id }.toTypedArray()) }) {
+                            Icon(Icons.Outlined.Speed, null, Modifier.size(16.dp), tint = ClaudeAccent)
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (probing) "Measuring…" else "Check latency", color = ClaudeAccent)
+                        }
+                    }
+                }
+                error?.let { Text(it, fontSize = 11.5.sp, color = QuotaRed) }
+                if (models.isNotEmpty()) {
+                    Text("Pick the model this provider should default to. Tap one, or check the latency first.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f))
+                    models.take(40).forEach { m ->
+                        val probe = probes[m.id]
+                        Row(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { picked = m.id }.padding(vertical = 5.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(m.name?.takeIf { it.isNotBlank() } ?: m.id, fontSize = 12.5.sp, modifier = Modifier.weight(1f))
+                            probe?.let { LatencyBadge(it) }
+                            Spacer(Modifier.width(6.dp))
+                            RadioButton(selected = picked == m.id, onClick = { picked = m.id })
+                        }
+                    }
+                    if (models.size > 40) Text("…and ${models.size - 40} more (the full list is kept)", fontSize = 10.5.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f))
+                }
+                OutlinedTextField(
+                    name, { name = it; nameTouched = true }, label = { Text("Name") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            val canAdd = !saving && !detecting && hostOk && models.isNotEmpty() && picked.isNotBlank() &&
+                (key.isNotBlank() || !needsKey)
+            TextButton(
+                enabled = canAdd,
+                onClick = {
+                    saving = true
+                    error = null
+                    val provider = ClaudeProvider(
+                        name = name.ifBlank { providerNameOf(usableUrl) },
+                        base_url = usableUrl,
+                        api_key = key.trim().ifBlank { null },
+                        models_url = modelsUrl.orEmpty(),
+                        auth_mode = authMode,
+                        // the picked model first, so it is the one the chat's picker offers on top
+                        models = models.sortedBy { if (it.id == picked) 0 else 1 }
+                    )
+                    backend.addProvider(provider) { saved, err ->
+                        saving = false
+                        if (saved != null) {
+                            Toast.makeText(context, "Provider added", Toast.LENGTH_SHORT).show()
+                            onSaved(saved, picked)
+                        } else {
+                            error = err ?: "the provider could not be saved"
+                        }
+                    }
+                }
+            ) { Text(if (saving) "Adding…" else "Add", color = ClaudeAccent, fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = { TextButton(enabled = !saving && !detecting, onClick = onDismiss) { Text("Cancel") } }
     )
 }
