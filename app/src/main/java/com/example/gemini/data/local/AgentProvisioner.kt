@@ -350,11 +350,15 @@ object AgentProvisioner {
         log("[hermes] installing Hermes Agent (needs git + curl inside the container)...")
         val script = """
             set -e
-            if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
-              echo "installing git, curl, ca-certificates and libatomic1..."
-              apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git curl ca-certificates libatomic1
-            fi
+            # Mirrors Mobile-Harness' known-good command for this installer: the
+            # full build toolchain is required because pm.cli resolves some
+            # dependencies as sdists. apt is run unconditionally — a half-finished
+            # earlier apt run is the other way this install gets wedged.
+            echo "installing build dependencies (git, curl, python3, build-essential)..."
+            apt-get update -qq || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+              git curl ca-certificates libatomic1 \
+              python3 python3-pip python3-venv build-essential python3-dev libffi-dev || true
             # uv refuses to hardlink on this filesystem (proot on f2fs); copy mode
             # is what Mobile-Harness uses for the same installer.
             export UV_LINK_MODE=copy
@@ -363,18 +367,57 @@ object AgentProvisioner {
             rm -f /var/lib/apt/lists/lock /var/lib/apt/lists/partial/.lock \
               /var/cache/apt/archives/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>/dev/null || true
             dpkg --configure -a 2>/dev/null || true
+            # A partially-extracted uv cache entry (missing WHEEL / dist-info) makes
+            # pm.cli fail permanently with "Failed to install: <wheel>", so a retry
+            # never recovers. Clear it before installing.
+            rm -rf /root/.hermes/cache/uv/archive-v0 \
+              /root/.hermes/cache/uv/sdists-v9 \
+              /root/.hermes/cache/uv/wheels-v* 2>/dev/null || true
+            # A non-git copy of the agent tree left by an aborted run must go, otherwise
+            # the installer trusts it and skips the clone; a healthy git checkout stays.
+            if [ -d /usr/local/lib/hermes-agent ] && [ ! -d /usr/local/lib/hermes-agent/.git ]; then
+              rm -rf /usr/local/lib/hermes-agent
+            fi
+            if [ -d /root/.hermes/hermes-agent ] && [ ! -d /root/.hermes/hermes-agent/.git ]; then
+              rm -rf /root/.hermes/hermes-agent
+            fi
             mkdir -p $GUEST_DOWNLOAD_DIR
             curl -fsSL $HERMES_INSTALL_URL -o $GUEST_DOWNLOAD_DIR/hermes-install.sh
-            # --non-interactive keeps the installer away from /dev/tty (no prompts, no setup stage);
-            # --skip-browser avoids pulling a Chromium build the CLI does not need. The full log stays
-            # in the container; only stage banners are streamed here so the installer log stays readable.
-            set -o pipefail
-            bash $GUEST_DOWNLOAD_DIR/hermes-install.sh --non-interactive --skip-browser --skip-computer-use < /dev/null 2>&1 \
-              | tr '\r' '\n' | grep --line-buffered -E '^(==>|\[|✔|✖|⚠|Error|error|Fatal|fatal)' || {
-                status=${'$'}{PIPESTATUS[0]}
-                echo "hermes installer exited ${'$'}status (full log: /root/.hermes/logs/install.log)"
-                exit 5
-              }
+            # The installer spawns pm.cli (`python -I`, so no PYTHONPATH) and pm rebuilds
+            # the uv child env dropping every UV_* setting, while redirecting XDG_CONFIG_HOME
+            # to an empty temp dir. /etc/uv/uv.toml is the one config uv still reads there,
+            # and --link2symlink turns the leftover link(2) failures into copy-mode installs.
+            run_installer() {
+              bash $GUEST_DOWNLOAD_DIR/hermes-install.sh --non-interactive --skip-browser --skip-computer-use < /dev/null 2>&1 \
+                | tr '\r' '\n' | grep --line-buffered -E '^(==>|\[|✔|✖|⚠|Error|error|Fatal|fatal)'
+              return "${'$'}{PIPESTATUS[0]}"
+            }
+            set +e
+            run_installer
+            status=${'$'}?
+            set -e
+            if [ "${'$'}status" -ne 0 ]; then
+              # A partially-extracted uv cache entry (missing WHEEL/dist-info) makes every
+              # later attempt fail the same way, so a plain retry can never recover. Clear
+              # the cache and the aborted checkout, then try once more from a clean slate.
+              echo "hermes installer exited ${'$'}status; clearing the uv cache and retrying once"
+              tail -40 /root/.hermes/logs/install.log 2>/dev/null | tr '\r' '\n' || true
+              rm -rf /root/.hermes/cache/uv/archive-v0 /root/.hermes/cache/uv/sdists-v9 \
+                /root/.hermes/cache/uv/wheels-v* 2>/dev/null || true
+              rm -rf /usr/local/lib/hermes-agent /root/.hermes/hermes-agent 2>/dev/null || true
+              set +e
+              run_installer
+              status=${'$'}?
+              set -e
+            fi
+            if [ "${'$'}status" -ne 0 ]; then
+              echo "hermes installer exited ${'$'}status (full log: /root/.hermes/logs/install.log)"
+              echo "---- installer log (tail) ----"
+              tail -60 /root/.hermes/logs/install.log 2>/dev/null | tr '\r' '\n' || true
+              echo "---- end installer log ----"
+              cp /root/.hermes/logs/install.log /sdcard/Download/hermes-install-log.txt 2>/dev/null || true
+              exit 5
+            fi
             rm -f $GUEST_DOWNLOAD_DIR/hermes-install.sh
             if [ -x $HERMES_PATH ]; then
               ln -sf $HERMES_PATH /usr/local/bin/hermes
