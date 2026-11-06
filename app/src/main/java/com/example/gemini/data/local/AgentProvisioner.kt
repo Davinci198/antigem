@@ -393,15 +393,41 @@ object AgentProvisioner {
             # again after the install (in case a stage refreshed the checkout).
             patch_pm_uv() {
               for d in /root/.hermes/hermes-agent /usr/local/lib/hermes-agent; do
-                [ -f "${'$'}d/pm/environment.py" ] || continue
-                # A previous run's patch may have hit both `"--compile-bytecode"]`
-                # occurrences (the sync command and the fallback comprehension) and
-                # left the file unparseable, so restore the checkout first.
+                f="${'$'}d/pm/environment.py"
+                [ -f "${'$'}f" ] || continue
+                # A previous run may have left a bad patch behind (an earlier version
+                # rewrote both `"--compile-bytecode"]` occurrences and made the module
+                # unparseable), so restore the checkout before editing.
                 if [ -d "${'$'}d/.git" ]; then
                   git -C "${'$'}d" checkout -- pm/environment.py 2>/dev/null || true
                 fi
-                python3 -c 'import sys,pathlib;p=pathlib.Path(sys.argv[1]);s=p.read_text();s=s.replace("arg != \"--compile-bytecode\", \"--link-mode\", \"copy\"]","arg != \"--compile-bytecode\"]").replace(", \"--compile-bytecode\"]", ", \"--compile-bytecode\", \"--link-mode\", \"copy\"]").replace("\"pip\", \"install\", \"--no-config\"", "\"pip\", \"install\", \"--no-config\", \"--link-mode\", \"copy\"");p.write_text(s)' "${'$'}d/pm/environment.py" 2>/dev/null || true
-                python3 -c 'import sys,ast;ast.parse(open(sys.argv[1]).read())' "${'$'}d/pm/environment.py" 2>/dev/null || echo "warning: ${'$'}d/pm/environment.py did not parse after patching"
+                cat > /tmp/patch_pm.py <<'PYEOF'
+import pathlib, re, sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+# 1) Repair damage an earlier version of this patch could have left: it rewrote
+#    every `"--compile-bytecode"]`, including the fallback comprehension, which
+#    made the module unparseable.
+text = text.replace('arg != "--compile-bytecode", "--link-mode", "copy"]',
+                    'arg != "--compile-bytecode"]')
+# 2) Mask the fallback comprehension so only the sync command list gains flags.
+guard = "@@FALLBACK_ARGS@@"
+text = text.replace('arg != "--compile-bytecode"]', guard)
+# 3) Collapse duplicates first, then add once, so repeat runs cannot stack flags.
+text = re.sub(r'(, "--compile-bytecode")(?:, "--link-mode", "copy")*', r'\1', text)
+text = text.replace(', "--compile-bytecode"]',
+                    ', "--compile-bytecode", "--link-mode", "copy"]')
+text = re.sub(r'("pip", "install", "--no-config")(?:, "--link-mode", "copy")*',
+              r'\1, "--link-mode", "copy"', text)
+# 4) Unmask.
+text = text.replace(guard, 'arg != "--compile-bytecode"]')
+path.write_text(text)
+PYEOF
+                python3 /tmp/patch_pm.py "${'$'}f" || true
+                # Never ship an unparseable pm: it fails the whole install at import.
+                python3 -c 'import ast,sys;ast.parse(open(sys.argv[1]).read())' "${'$'}f" 2>/dev/null \
+                  || echo "warning: could not patch ${'$'}f, leaving it as-is"
               done
             }
             # Only stage banners and the failure cause are streamed: sweeping all of
