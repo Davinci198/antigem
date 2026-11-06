@@ -183,6 +183,8 @@ func (m *Manager) provider(id string) (Provider, bool) {
 // Every model alias is pinned to the provider's model, so subagents, plan mode and aliases never ask for a Claude
 // model the provider lacks; the same keys also override any ANTHROPIC_* a user's settings.json would add.
 func (m *Manager) providerSettingsFile(p Provider, model string) (string, error) {
+	// the stored base URL may still carry a path a user pasted (…/v1): chats always use the cleaned one
+	p.BaseURL = cleanBaseURL(p.BaseURL)
 	small := p.SmallModel
 	if small == "" {
 		small = model
@@ -563,8 +565,39 @@ var (
 	envNameRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
+// cleanBaseURL removes a trailing API path a user may have pasted from a provider's docs (…/v1,
+// /v1/messages, /v1/chat/completions, /v1/models), so the composed "<base>/v1/messages" stays right.
+// "https://api.x/v1" and "https://api.x/v1/chat/completions" both become "https://api.x".
+func cleanBaseURL(raw string) string {
+	s := strings.TrimRight(strings.TrimSpace(raw), "/")
+	hostEnd := 0
+	if u, err := url.Parse(s); err == nil && u.Scheme != "" && u.Host != "" {
+		hostEnd = len(u.Scheme) + len("://") + len(u.Host)
+	}
+	for {
+		before := s
+		s = strings.TrimRight(s, "/")
+		for _, suf := range []string{
+			"/v1/chat/completions", "/chat/completions", "/v1/completions", "/completions",
+			"/v1/messages", "/messages", "/v1/models", "/models", "/v1",
+		} {
+			if strings.HasSuffix(s, suf) && len(s) > len(suf)+1 {
+				t := strings.TrimRight(strings.TrimSuffix(s, suf), "/")
+				if len(t) >= hostEnd {
+					s = t
+					break
+				}
+			}
+		}
+		if s == before {
+			return s
+		}
+	}
+}
+
 // normalizeProvider validates and cleans the optional fields of p.
 func normalizeProvider(p *Provider) error {
+	p.BaseURL = cleanBaseURL(p.BaseURL)
 	if p.AuthMode != authXAPIKey {
 		p.AuthMode = authBearer
 	}

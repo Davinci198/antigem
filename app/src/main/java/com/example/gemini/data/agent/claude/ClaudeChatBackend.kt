@@ -1006,7 +1006,7 @@ class ClaudeChatBackend(
         onResult: (models: List<ClaudeProviderModel>, modelsUrl: String?, error: String?) -> Unit,
     ) {
         backendScope.launch {
-            val base = baseUrl.trim().trimEnd('/')
+            val base = normaliseBaseUrl(baseUrl)
             if (base.isEmpty()) {
                 onResult(emptyList(), null, "enter the base URL first")
                 return@launch
@@ -1713,4 +1713,36 @@ fun tokenLabel(n: Long): String = when {
     n >= 1_000_000 -> (n / 1_000_000.0).let { if (it % 1.0 == 0.0) "${it.toLong()}M" else String.format(java.util.Locale.US, "%.1fM", it) }
     n >= 1000 -> "${(n + 500) / 1000}K"
     else -> n.toString()
+}
+
+/**
+ * Removes a trailing API path a user may have pasted from a provider's docs (…/v1, /v1/messages,
+ * /v1/chat/completions, /v1/models), so the "<base>/v1/messages" URL the chat will call stays right.
+ * "https://api.x/v1" and "https://api.x/v1/chat/completions" both become "https://api.x";
+ * "https://api.deepseek.com/anthropic" and "https://openrouter.ai/api" are left alone.
+ */
+fun normaliseBaseUrl(raw: String): String {
+    var s = raw.trim().trimEnd('/')
+    val hostEnd = runCatching {
+        val u = java.net.URI(s)
+        if (u.scheme != null && u.authority != null) u.scheme.length + "://".length + u.authority.length else 0
+    }.getOrDefault(0)
+    val suffixes = listOf(
+        "/v1/chat/completions", "/chat/completions", "/v1/completions", "/completions",
+        "/v1/messages", "/messages", "/v1/models", "/models", "/v1",
+    )
+    while (true) {
+        val before = s
+        s = s.trimEnd('/')
+        for (suf in suffixes) {
+            if (s.endsWith(suf) && s.length > suf.length + 1) {
+                val t = s.removeSuffix(suf).trimEnd('/')
+                if (t.length >= hostEnd) {
+                    s = t
+                    break
+                }
+            }
+        }
+        if (s == before) return s
+    }
 }

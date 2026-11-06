@@ -77,6 +77,25 @@ func fetchProviderModelsRaw(ctx context.Context, p Provider, freeOnly bool) ([]P
 	if mp == nil {
 		mp = &ModelsMapping{}
 	}
+
+	// Some OpenAI-first providers (NVIDIA's integrate.api.nvidia.com…) answer an empty Anthropic-style list when the
+	// request carries anthropic-version; their real list comes back without it. A first page that is 2xx but empty is
+	// retried once with those headers stripped.
+	for attempt := 0; ; attempt++ {
+		all, raw, err := fetchProviderModelsLoop(ctx, p, listURL, mp, freeOnly, attempt > 0)
+		if err != nil {
+			return nil, raw, err
+		}
+		if attempt == 0 && raw.Entries == 0 && raw.Status/100 == 2 && !isOpenRouter(listURL) {
+			continue
+		}
+		return all, raw, nil
+	}
+}
+
+// fetchProviderModelsLoop runs the paginated fetch once. With stripAnthropic the request goes out without the
+// anthropic-version / x-api-key headers (Authorization stays), which is how providers like NVIDIA list their models.
+func fetchProviderModelsLoop(ctx context.Context, p Provider, listURL string, mp *ModelsMapping, freeOnly bool, stripAnthropic bool) ([]ProviderModel, *FetchRaw, error) {
 	raw := &FetchRaw{URL: listURL}
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
@@ -87,7 +106,7 @@ func fetchProviderModelsRaw(ctx context.Context, p Provider, freeOnly bool) ([]P
 		next = withQuery(listURL, mp.limitParam(), pageSizeValue(mp))
 	)
 	for page := 1; next != ""; page++ {
-		body, status, err := fetchModelsPage(ctx, p, next, raw, page == 1)
+		body, status, err := fetchModelsPage(ctx, p, next, raw, page == 1, stripAnthropic)
 		if err != nil {
 			if page == 1 {
 				return nil, raw, err
@@ -188,13 +207,13 @@ func withQuery(rawURL, name, value string) string {
 }
 
 // fetchModelsPage GETs one page of the list. The first page's request and answer are kept in raw.
-func fetchModelsPage(ctx context.Context, p Provider, pageURL string, raw *FetchRaw, first bool) ([]byte, int, error) {
+func fetchModelsPage(ctx context.Context, p Provider, pageURL string, raw *FetchRaw, first bool, stripAnthropic bool) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+p.APIKey)
-	if !isOpenRouter(pageURL) {
+	if !isOpenRouter(pageURL) && !stripAnthropic {
 		// Anthropic-style lists want these; OpenRouter answers them with a short Anthropic-only list instead
 		req.Header.Set("x-api-key", p.APIKey)
 		req.Header.Set("anthropic-version", "2023-06-01")

@@ -211,3 +211,22 @@ func TestProviderRetries(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanBaseURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://integrate.api.nvidia.com/v1/chat/completions": "https://integrate.api.nvidia.com",
+		"https://integrate.api.nvidia.com/v1":                  "https://integrate.api.nvidia.com",
+		"https://integrate.api.nvidia.com/v1/v1":               "https://integrate.api.nvidia.com",
+		"https://integrate.api.nvidia.com/v1/messages":         "https://integrate.api.nvidia.com",
+		"https://integrate.api.nvidia.com/":                    "https://integrate.api.nvidia.com",
+		"https://api.deepseek.com/anthropic":                   "https://api.deepseek.com/anthropic",
+		"https://openrouter.ai/api":                            "https://openrouter.ai/api",
+		"https://example.com/models/":                          "https://example.com",
+		"http://localhost:8080":                                "http://localhost:8080",
+		"https://api.moonshot.ai/anthropic/":                   "https://api.moonshot.ai/anthropic",
+	} {
+		if got := cleanBaseURL(in); got != want {
+			t.Errorf("cleanBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

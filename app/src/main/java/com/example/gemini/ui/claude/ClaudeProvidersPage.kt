@@ -568,7 +568,7 @@ private fun ProviderEditor(
         val defCtx = parseTokens(defaultCtxText) ?: return null to "The default context window must be a number like 128k"
         val defOut = parseTokens(defaultOutText) ?: return null to "The default max output must be a number like 8k"
         return initial.copy(
-            name = name, base_url = baseUrl, api_key = key.ifBlank { null }, auth_mode = authMode,
+            name = name, base_url = normaliseBaseUrl(baseUrl), api_key = key.ifBlank { null }, auth_mode = authMode,
             models_url = if (openRouter) "" else modelsUrl, small_model = smallModel, models = models,
             headers = h, extra_env = e, timeout_sec = timeout, thinking_budget = budget, disable_betas = disableBetas,
             default_context = defCtx, default_max_output = defOut, models_map = map, max_retries = retries
@@ -1367,11 +1367,11 @@ private fun QuickAddProviderDialog(backend: ClaudeChatBackend, onDismiss: () -> 
     val trimmed = baseUrl.trim()
     val hasScheme = trimmed.startsWith("http://") || trimmed.startsWith("https://")
     val badScheme = trimmed.contains("://") && !hasScheme
-    val usableUrl = when {
+    val usableUrl = normaliseBaseUrl(when {
         trimmed.isBlank() || badScheme -> ""
         hasScheme -> trimmed
         else -> "http://$trimmed"
-    }
+    })
     val needsKey = usableUrl.isNotBlank() && !isLoopbackHost(usableUrl)
     val hostOk = usableUrl.removePrefix("https://").removePrefix("http://").isNotBlank()
     val canDetect = hostOk && !detecting && (key.isNotBlank() || !needsKey)
