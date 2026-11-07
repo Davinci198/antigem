@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -73,12 +74,12 @@ func (m *Manager) session(id string) *Session {
 		return s
 	}
 	s := &Session{
-		id:       id,
-		msgs:     []Message{},
-		subs:     map[*sub]struct{}{},
-		abortCh:  make(chan struct{}, 1),
+		id:        id,
+		msgs:      []Message{},
+		subs:      map[*sub]struct{}{},
+		abortCh:   make(chan struct{}, 1),
 		hermesBin: m.hermesBin,
-		homeDir:  m.homeDir,
+		homeDir:   m.homeDir,
 	}
 	m.sessions[id] = s
 	return s
@@ -290,6 +291,8 @@ func (s *Session) runTurn(content string) {
 
 	cmd := exec.CommandContext(ctx, s.hermesBin, args...)
 	cmd.Dir = s.homeDir
+	stderr := &tailBuffer{max: 8 * 1024}
+	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		s.emit(obj{"type": "error", "message": fmt.Sprintf("spawn failed: %v", err)})
@@ -305,6 +308,37 @@ func (s *Session) runTurn(content string) {
 	assistantText := strings.Builder{}
 	msgID := uuid.New().String()
 	startedAssistant := false
+	doneSent := false
+	var usage interface{}
+
+	emitAssistantStart := func() {
+		if startedAssistant {
+			return
+		}
+		startedAssistant = true
+		s.emit(obj{"type": "assistant_start"})
+	}
+	appendDelta := func(delta string) {
+		if delta == "" {
+			return
+		}
+		emitAssistantStart()
+		assistantText.WriteString(delta)
+		s.emit(obj{"type": "assistant_delta", "delta": delta})
+	}
+	emitDone := func() {
+		if doneSent {
+			return
+		}
+		doneSent = true
+		s.emit(obj{"type": "assistant_done", "usage": usage, "title": s.derivedTitle(content)})
+		if assistantText.Len() == 0 {
+			return
+		}
+		s.mu.Lock()
+		s.msgs = append(s.msgs, Message{ID: msgID, Role: "assistant", Content: assistantText.String()})
+		s.mu.Unlock()
+	}
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
@@ -319,25 +353,21 @@ func (s *Session) runTurn(content string) {
 		}
 		evType, _ := ev["type"].(string)
 		switch evType {
-		case "session_created":
-			// hermes --pass-session-id emits this on start
+		case "session_created", "system":
+			// stream-json reports the session id in system/init; keep it so the
+			// next turn resumes the same Hermes session instead of starting over.
 			if sid, ok := ev["session_id"].(string); ok && sid != "" {
 				s.mu.Lock()
 				s.hermesSessionID = sid
 				s.mu.Unlock()
 			}
-		case "assistant":
-			// delta text
+		case "assistant", "text":
+			// legacy schema used assistant/content; stream-json uses text/text
 			delta, _ := ev["content"].(string)
 			if delta == "" {
-				break
+				delta, _ = ev["text"].(string)
 			}
-			if !startedAssistant {
-				s.emit(obj{"type": "assistant_start"})
-				startedAssistant = true
-			}
-			assistantText.WriteString(delta)
-			s.emit(obj{"type": "assistant_delta", "delta": delta})
+			appendDelta(delta)
 
 		case "tool_use", "tool":
 			// show tool name as status
@@ -347,34 +377,114 @@ func (s *Session) runTurn(content string) {
 			}
 
 		case "result":
-			// turn complete
-			usage := ev["usage"]
-			s.emit(obj{
-				"type":  "assistant_done",
-				"usage": usage,
-				"title": s.derivedTitle(content),
-			})
-			s.mu.Lock()
-			s.msgs = append(s.msgs, Message{ID: msgID, Role: "assistant", Content: assistantText.String()})
-			s.mu.Unlock()
+			// The gateway assigns the session id after system/init, so the
+			// result envelope is the authoritative place to learn it.
+			if sid, ok := ev["session_id"].(string); ok && sid != "" {
+				s.mu.Lock()
+				s.hermesSessionID = sid
+				s.mu.Unlock()
+			}
+			// result.text is the complete reply; use it when no deltas arrived
+			// (replay gap, or providers that only report the final answer).
+			if txt, ok := ev["text"].(string); ok && txt != "" && assistantText.Len() == 0 {
+				appendDelta(txt)
+			}
+			if u := usageFromTokens(ev["tokens"]); u != nil {
+				usage = u
+			}
+			if msg, _ := ev["error"].(string); msg != "" {
+				s.emit(obj{"type": "error", "message": msg})
+			} else if code := jsonInt(ev["exit_code"]); code != 0 {
+				s.emit(obj{"type": "error", "message": exitMessage(code, stderr.String())})
+			}
+			emitDone()
 
 		case "error":
 			msg, _ := ev["message"].(string)
+			if msg == "" {
+				msg, _ = ev["error"].(string)
+			}
+			if msg == "" {
+				msg = "hermes error"
+			}
 			s.emit(obj{"type": "error", "message": msg})
 		}
 	}
 
 	_ = stdout.Close()
-	_ = cmd.Wait()
-
-	// If we never opened the assistant bubble (e.g. very short responses where
-	// result arrives without prior assistant events), emit a minimal done.
-	if startedAssistant {
-		// already emitted assistant_done from result event above — nothing to do
-	} else {
-		// may have been aborted before any output
-		s.emit(obj{"type": "assistant_done", "title": s.derivedTitle(content)})
+	waitErr := cmd.Wait()
+	if !doneSent {
+		// Surface provider/auth failures instead of a silent empty reply. An
+		// aborted turn cancels ctx, so it is not reported as an error.
+		if waitErr != nil && ctx.Err() == nil {
+			s.emit(obj{"type": "error", "message": exitMessage(exitCodeOf(waitErr), stderr.String())})
+		}
+		emitDone()
 	}
+}
+
+// tailBuffer keeps the last max bytes written to it so a failed Hermes run can
+// report the end of stderr without buffering an unbounded log.
+type tailBuffer struct {
+	buf []byte
+	max int
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string { return string(t.buf) }
+
+func jsonInt(v interface{}) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
+}
+
+// usageFromTokens maps stream-json result.tokens onto the token shape the app
+// renders (input_tokens/output_tokens).
+func usageFromTokens(v interface{}) interface{} {
+	tokens, ok := v.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return obj{
+		"input_tokens":  jsonInt(tokens["input"]),
+		"output_tokens": jsonInt(tokens["output"]),
+		"total_tokens":  jsonInt(tokens["total"]),
+	}
+}
+
+func exitCodeOf(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return 1
+}
+
+func exitMessage(code int, stderr string) string {
+	stderr = strings.TrimSpace(stderr)
+	if stderr == "" {
+		return fmt.Sprintf("hermes exited with code %d", code)
+	}
+	lines := strings.Split(stderr, "\n")
+	if len(lines) > 6 {
+		lines = lines[len(lines)-6:]
+	}
+	return fmt.Sprintf("hermes exited with code %d: %s", code, strings.Join(lines, " | "))
 }
 
 // derivedTitle truncates the first user message into a conversation title.
