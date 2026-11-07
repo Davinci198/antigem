@@ -62,9 +62,14 @@ private val AGENT_OPTIONS = listOf(
         "Anthropic's Claude Code CLI on this device: your Claude subscription or Anthropic Console account."
     ),
     AgentOption(
-        setOf(AgentKind.AGY, AgentKind.CLAUDE),
-        "Both",
-        "Pick the agent for each new chat. Both share the chat list, status and accounts."
+        setOf(AgentKind.HERMES),
+        "Hermes Agent",
+        "Nous Research's autonomous agent with local toolset, skills, and persistent memory."
+    ),
+    AgentOption(
+        setOf(AgentKind.AGY, AgentKind.CLAUDE, AgentKind.HERMES),
+        "All Agents",
+        "Pick the agent for each new chat. All agents share the chat list, status and accounts."
     )
 )
 
@@ -86,9 +91,10 @@ fun AgentSelector(selected: Set<AgentKind>, onSelect: (Set<AgentKind>) -> Unit, 
                     if (option.agents.size == 1) {
                         AgentMark(option.agents.first(), size = 40.dp)
                     } else {
-                        Box(Modifier.size(width = 52.dp, height = 40.dp)) {
-                            AgentMark(AgentKind.AGY, size = 34.dp)
-                            AgentMark(AgentKind.CLAUDE, size = 34.dp, modifier = Modifier.offset(x = 18.dp, y = 6.dp))
+                        Box(Modifier.size(width = 56.dp, height = 40.dp)) {
+                            AgentMark(AgentKind.AGY, size = 30.dp)
+                            AgentMark(AgentKind.CLAUDE, size = 30.dp, modifier = Modifier.offset(x = 13.dp, y = 5.dp))
+                            AgentMark(AgentKind.HERMES, size = 30.dp, modifier = Modifier.offset(x = 26.dp, y = 10.dp))
                         }
                     }
                     Spacer(Modifier.width(12.dp))
@@ -127,9 +133,10 @@ fun AgentChoiceDialog(onConfirm: (Set<AgentKind>) -> Unit) {
             modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp)
         ) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.size(width = 76.dp, height = 56.dp)) {
-                    AgentMark(AgentKind.AGY, size = 48.dp)
-                    AgentMark(AgentKind.CLAUDE, size = 48.dp, modifier = Modifier.offset(x = 28.dp, y = 8.dp))
+                Box(Modifier.size(width = 86.dp, height = 56.dp)) {
+                    AgentMark(AgentKind.AGY, size = 42.dp)
+                    AgentMark(AgentKind.CLAUDE, size = 42.dp, modifier = Modifier.offset(x = 22.dp, y = 7.dp))
+                    AgentMark(AgentKind.HERMES, size = 42.dp, modifier = Modifier.offset(x = 44.dp, y = 14.dp))
                 }
                 Spacer(Modifier.height(14.dp))
                 Text("Choose your agent", fontSize = 20.sp, fontWeight = FontWeight.Bold)

@@ -167,6 +167,24 @@ fun claudePlanLabel(raw: String): String = when (raw.lowercase()) {
  * Connection dot for one or two agents. With two different states the upper half is [top] (Antigravity) and the
  * lower half [bottom] (Claude Code); the same state (or one agent) draws one solid dot.
  */
+fun hermesStatusEntry(
+    serverRestarting: Boolean = false,
+    onRestartServer: () -> Unit = {}
+): AgentStatusEntry {
+    if (serverRestarting) {
+        return AgentStatusEntry(AgentKind.HERMES, "Restarting…", Color(0xFFF59E0B), "The local server is restarting.", pending = true)
+    }
+    return AgentStatusEntry(
+        agent = AgentKind.HERMES,
+        label = "Ready",
+        color = Color(0xFF10B981),
+        detail = "Hermes Agent CLI installed and active.",
+        action = null,
+        pending = false,
+        isReady = true
+    )
+}
+
 @Composable
 fun AgentStatusDot(top: Color, bottom: Color?, modifier: Modifier = Modifier, size: Dp = 11.dp, pulsing: Boolean = false) {
     val alpha = if (pulsing) {
@@ -195,6 +213,7 @@ fun AgentMark(agent: AgentKind, modifier: Modifier = Modifier, size: Dp = 32.dp,
             when (agent) {
                 AgentKind.AGY -> Icon(Icons.Outlined.RocketLaunch, null, tint = accent, modifier = Modifier.size(size * 0.52f))
                 AgentKind.CLAUDE -> Text("✻", color = accent, fontWeight = FontWeight.Bold, fontSize = (size.value * 0.5f).sp)
+                AgentKind.HERMES -> Text("☤", color = accent, fontWeight = FontWeight.Bold, fontSize = (size.value * 0.5f).sp)
             }
         }
         if (statusColor != null) {

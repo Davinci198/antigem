@@ -22,6 +22,7 @@ import (
 	"gemini-server/pkg/claude"
 	"gemini-server/pkg/config"
 	"gemini-server/pkg/handlers"
+	"gemini-server/pkg/hermes"
 	"gemini-server/pkg/hub"
 	"gemini-server/pkg/plugins"
 	"gemini-server/pkg/security"
@@ -46,6 +47,8 @@ Flags:
   --tz <location>           Timezone location name (e.g. Asia/Kathmandu)
   --no-hub                  Skip launching AGY Hub (run IDE server only)
   --no-claude               Disable Claude Code (no /api/claude endpoints, never runs the claude CLI)
+  --hermes-bin <path>       Custom path to the Hermes Agent CLI (default: hermes on PATH)
+  --no-hermes               Disable Hermes Agent (no /api/hermes endpoints, never runs the hermes CLI)
   -d, --dir <path>          Custom workspace directory
   -h, --help                Show help documentation`)
 }
@@ -118,6 +121,8 @@ func main() {
 	var customAgyBin string
 	var customClaudeBin string
 	var noClaude bool
+	var customHermesBin string
+	var noHermes bool
 	var forceStart bool
 	var skipHub bool
 	var cliToken string
@@ -158,6 +163,15 @@ func main() {
 			skipHub = true
 		case arg == "--no-claude":
 			noClaude = true
+		case strings.HasPrefix(arg, "--hermes-bin="):
+			customHermesBin = strings.TrimPrefix(arg, "--hermes-bin=")
+		case arg == "--hermes-bin":
+			if i+1 < len(os.Args) {
+				customHermesBin = os.Args[i+1]
+				i++
+			}
+		case arg == "--no-hermes":
+			noHermes = true
 		case strings.HasPrefix(arg, "--port="):
 			cfg.Port = strings.TrimPrefix(arg, "--port=")
 		case arg == "-p" || arg == "--port":
@@ -287,6 +301,19 @@ func main() {
 	} else {
 		claudeMgr = claude.NewManager(cfg.HomeDir, cfg.WorkspaceDir, customClaudeBin)
 		mux.Handle("/api/claude/", claudeMgr)
+	}
+
+	// Hermes Agent CLI sessions; off with --no-hermes
+	var hermesMgr *hermes.Manager
+	if noHermes {
+		mux.HandleFunc("/api/hermes/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"success":false,"disabled":true,"error":"Hermes Agent is turned off in the app"}`))
+		})
+	} else {
+		hermesMgr = hermes.NewManager(cfg.HomeDir, customHermesBin)
+		mux.Handle("/api/hermes/", hermesMgr)
 	}
 
 	// Custom AntiGem plugins on disk: list, install (ZIP or GitHub repository), update, remove, export
@@ -583,9 +610,12 @@ func main() {
 	// 1. Close all active WebSocket client connections immediately
 	wsHub.Close()
 
-	// 2. Stop Claude Code sessions, then the AGY Hub process group and continuous background monitor
+	// 2. Stop Claude Code and Hermes sessions, then the AGY Hub process group and continuous background monitor
 	if claudeMgr != nil {
 		claudeMgr.StopAll()
+	}
+	if hermesMgr != nil {
+		hermesMgr.StopAll()
 	}
 	if hubMgr != nil {
 		hubMgr.Stop()

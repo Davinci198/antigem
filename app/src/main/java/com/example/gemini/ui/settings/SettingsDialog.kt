@@ -594,6 +594,7 @@ private fun MainSettingsMenu(
 ) {
     val agyOn = com.example.gemini.domain.model.AgentKind.AGY in enabledAgents
     val claudeOn = com.example.gemini.domain.model.AgentKind.CLAUDE in enabledAgents
+    val hermesOn = com.example.gemini.domain.model.AgentKind.HERMES in enabledAgents
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -607,7 +608,8 @@ private fun MainSettingsMenu(
             iconTint = MaterialTheme.colorScheme.primary,
             title = "Agents",
             subtitle = when {
-                agyOn && claudeOn -> "Antigravity and Claude Code"
+                enabledAgents.size > 1 -> "${enabledAgents.size} agents active"
+                hermesOn -> "Hermes Agent only"
                 claudeOn -> "Claude Code only"
                 else -> "Antigravity only"
             },

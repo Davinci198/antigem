@@ -394,7 +394,13 @@ fun ChatScreen(
             onRetry = recheckClaude
         )
     } else null
-    val agentEntries = listOfNotNull(agyEntry, claudeEntry)
+    val hermesEntry = if (com.example.gemini.domain.model.AgentKind.HERMES in enabledAgents) {
+        com.example.gemini.ui.agents.hermesStatusEntry(
+            serverRestarting = serverRestarting,
+            onRestartServer = restartLocalServer
+        )
+    } else null
+    val agentEntries = listOfNotNull(agyEntry, claudeEntry, hermesEntry)
 
     // Slash commands Claude's CLI only shows in a terminal: the app opens its own screen instead
     val handleClaudeCommand: (com.example.gemini.data.agent.claude.ClaudeAppCommand) -> Unit = { cmd ->

@@ -29,14 +29,19 @@ val ClaudeAccent = Color(0xFFD97757)
 /** Antigravity's color across the app (same blue as its settings group). */
 val AgyAccent = Color(0xFF3B82F6)
 
+/** Hermes Agent accent — purple matching the Nous Research brand. */
+val HermesAccent = Color(0xFF8B5CF6)
+
 fun AgentKind.label(): String = when (this) {
     AgentKind.AGY -> "Antigravity"
     AgentKind.CLAUDE -> "Claude Code"
+    AgentKind.HERMES -> "Hermes"
 }
 
 fun AgentKind.accent(): Color = when (this) {
     AgentKind.AGY -> AgyAccent
     AgentKind.CLAUDE -> ClaudeAccent
+    AgentKind.HERMES -> HermesAccent
 }
 
 /**
@@ -97,5 +102,18 @@ fun ClaudeBadge(modifier: Modifier = Modifier) {
             .padding(horizontal = 5.dp, vertical = 1.dp)
     ) {
         Text(text = "Claude", fontSize = 9.5.sp, fontWeight = FontWeight.SemiBold, color = ClaudeAccent)
+    }
+}
+
+/** Small badge marking a Hermes conversation in lists. */
+@Composable
+fun HermesBadge(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(HermesAccent.copy(alpha = 0.16f))
+            .padding(horizontal = 5.dp, vertical = 1.dp)
+    ) {
+        Text(text = "Hermes", fontSize = 9.5.sp, fontWeight = FontWeight.SemiBold, color = HermesAccent)
     }
 }

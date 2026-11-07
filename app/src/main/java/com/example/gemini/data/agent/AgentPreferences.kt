@@ -56,6 +56,7 @@ class AgentPreferences(context: Context) {
             return buildString {
                 if (AgentKind.AGY !in enabled) append(" --no-hub")
                 if (AgentKind.CLAUDE !in enabled) append(" --no-claude")
+                if (AgentKind.HERMES !in enabled) append(" --no-hermes")
             }
         }
     }

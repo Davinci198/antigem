@@ -831,7 +831,8 @@ fun ChatHistoryDrawer(
                     listOf<Pair<com.example.gemini.domain.model.AgentKind?, String>>(
                         null to "All",
                         com.example.gemini.domain.model.AgentKind.AGY to "Antigravity",
-                        com.example.gemini.domain.model.AgentKind.CLAUDE to "Claude"
+                        com.example.gemini.domain.model.AgentKind.CLAUDE to "Claude",
+                        com.example.gemini.domain.model.AgentKind.HERMES to "Hermes"
                     ).forEach { (agent, label) ->
                         val selected = agentFilter == agent
                         val accent = agent?.accent() ?: ClaudeTerracotta
@@ -938,7 +939,7 @@ fun ChatHistoryDrawer(
                                     val conv = item.conv
                                     val isSelected = conv.id == currentConversationId
                                     val activeInst = activeInstances.find { it.conversationId == conv.id }
-                                    val isActivelyRunning = conv.isRunning && (systemConnectionState.isHubOnline || conv.agent == com.example.gemini.domain.model.AgentKind.CLAUDE)
+                                    val isActivelyRunning = conv.isRunning && (systemConnectionState.isHubOnline || conv.agent != com.example.gemini.domain.model.AgentKind.AGY)
                                     val isScheduledOrBackground =
                                         systemConnectionState.isHubOnline && !isActivelyRunning && (conv.notFullyIdle || conv.hasActivity || activeInst != null)
 
@@ -1047,7 +1048,7 @@ fun ChatHistoryDrawer(
                                         val conv = item.conv
                                         val isSelected = conv.id == currentConversationId
                                         val activeInst = activeInstances.find { it.conversationId == conv.id }
-                                        val isActivelyRunning = conv.isRunning && (systemConnectionState.isHubOnline || conv.agent == com.example.gemini.domain.model.AgentKind.CLAUDE)
+                                        val isActivelyRunning = conv.isRunning && (systemConnectionState.isHubOnline || conv.agent != com.example.gemini.domain.model.AgentKind.AGY)
                                         val isScheduledOrBackground =
                                             systemConnectionState.isHubOnline && !isActivelyRunning && (conv.notFullyIdle || conv.hasActivity || activeInst != null)
 
@@ -1517,6 +1518,8 @@ private fun ChatHistoryItemRow(
             ) {
                 if (conv.agent == com.example.gemini.domain.model.AgentKind.CLAUDE) {
                     com.example.gemini.ui.components.ClaudeBadge(modifier = Modifier.padding(start = 6.dp))
+                } else if (conv.agent == com.example.gemini.domain.model.AgentKind.HERMES) {
+                    com.example.gemini.ui.components.HermesBadge(modifier = Modifier.padding(start = 6.dp))
                 }
                 if (subagents.isNotEmpty()) {
                     Surface(
