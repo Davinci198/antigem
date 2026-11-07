@@ -5,6 +5,7 @@ import android.util.Log
 import com.example.gemini.data.agent.AgentChatBackend
 import com.example.gemini.data.agent.ChatSessionStore
 import com.example.gemini.data.preferences.AuthPreferences
+import com.example.gemini.data.remote.AgyBridgeService
 import com.example.gemini.domain.model.AgentKind
 import com.example.gemini.domain.model.ChatMessage
 import com.example.gemini.domain.model.Conversation
@@ -19,7 +20,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -27,7 +27,6 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 
 private const val TAG = "HermesChatBackend"
 
@@ -42,7 +41,8 @@ class HermesChatBackend(
     private val application: Application,
     private val backendScope: CoroutineScope,
     private val store: ChatSessionStore,
-    private val authPrefs: AuthPreferences
+    private val authPrefs: AuthPreferences,
+    private val bridge: AgyBridgeService = AgyBridgeService.instance
 ) : AgentChatBackend {
 
     override val kind: AgentKind get() = AgentKind.HERMES
@@ -70,13 +70,6 @@ class HermesChatBackend(
     /** "Starting Hermes…" while the bridge is booting the process. */
     val startupStatus: StateFlow<String?> = _startupStatus.asStateFlow()
 
-    // ── HTTP / WS clients ─────────────────────────────────────────────────────
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)   // streaming
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
-
     private var activeSession: String? = null
     private var activeWs: WebSocket? = null
     private var streamingJob: Job? = null
@@ -96,7 +89,7 @@ class HermesChatBackend(
             _isStreaming.value = false
             _conversationError.value = null
             _conversations.value = _conversations.value + conv
-            store.setCurrentConversation(conv)
+            store.currentConversation.value = conv
         }
     }
 
@@ -110,7 +103,7 @@ class HermesChatBackend(
             disconnectWs()
             val conv = _conversations.value.find { it.id == id } ?: return@launch
             _isLoadingConversation.value = true
-            store.setCurrentConversation(conv)
+            store.currentConversation.value = conv
             // reload history from bridge
             runCatching { loadHistory(conv) }
                 .onFailure { _conversationError.value = it.message }
@@ -128,7 +121,7 @@ class HermesChatBackend(
         backendScope.launch {
             activeSession?.let { sid ->
                 runCatching {
-                    postBridge("/api/hermes/sessions/$sid/abort", "{}")
+                    postBridge("/sessions/$sid/abort", "{}")
                 }
             }
             _isStreaming.value = false
@@ -143,11 +136,11 @@ class HermesChatBackend(
     override fun deleteConversation(id: String) {
         backendScope.launch {
             if (activeSession != null && store.currentConversation.value?.id == id) disconnectWs()
-            runCatching { postBridge("/api/hermes/sessions/$id/delete", "{}") }
+            runCatching { postBridge("/sessions/$id/delete", "{}") }
             _conversations.value = _conversations.value.filter { it.id != id }
             if (store.currentConversation.value?.id == id) {
                 val next = _conversations.value.lastOrNull()
-                store.setCurrentConversation(next)
+                store.currentConversation.value = next
                 if (next != null) selectConversation(next.id) else startNewChat()
             }
         }
@@ -167,6 +160,8 @@ class HermesChatBackend(
     override fun onAppForegrounded() = retryConnections()
 
     // ── private helpers ───────────────────────────────────────────────────────
+
+    private fun url(path: String) = AuthPreferences.currentBridgeHttpUrl.trimEnd('/') + "/api/hermes" + path
 
     private suspend fun doSend(conv: Conversation, text: String) {
         _conversationError.value = null
@@ -198,7 +193,7 @@ class HermesChatBackend(
         // send the message payload to the running session
         runCatching {
             postBridge(
-                "/api/hermes/sessions/$sid/send",
+                "/sessions/$sid/send",
                 JSONObject().put("content", text).toString()
             )
         }.onFailure {
@@ -211,13 +206,13 @@ class HermesChatBackend(
             .put("conversation_id", conv.id)
             .put("title", conv.title)
             .toString()
-        val resp = postBridge("/api/hermes/sessions", body)
+        val resp = postBridge("/sessions", body)
         JSONObject(resp).getString("session_id")
     }
 
     private suspend fun loadHistory(conv: Conversation) = withContext(Dispatchers.IO) {
         val sid = activeSession ?: return@withContext
-        val resp = getBridge("/api/hermes/sessions/$sid/history")
+        val resp = getBridge("/sessions/$sid/history")
         val arr = JSONObject(resp).optJSONArray("messages") ?: return@withContext
         val msgs = mutableListOf<ChatMessage>()
         for (i in 0 until arr.length()) {
@@ -235,15 +230,9 @@ class HermesChatBackend(
     private fun reconnectWs(sid: String) {
         streamingJob?.cancel()
         activeWs?.cancel()
-        val wsUrl = authPrefs.currentBridgeHttpUrl
-            .trimEnd('/')
-            .replace("http://", "ws://")
-            .replace("https://", "wss://") +
-                "/api/hermes/sessions/$sid/stream"
-        val req = Request.Builder().url(wsUrl)
-            .addHeader(authPrefs.bridgeAuthHeader, authPrefs.bridgeAuthToken)
-            .build()
-        activeWs = http.newWebSocket(req, HermesWsListener(sid))
+        val wsUrl = url("/sessions/$sid/stream").replaceFirst("http", "ws")
+        val req = Request.Builder().url(wsUrl).build()
+        activeWs = bridge.wsClient.newWebSocket(req, HermesWsListener(sid))
         Log.d(TAG, "WS connecting to $wsUrl")
     }
 
@@ -257,20 +246,14 @@ class HermesChatBackend(
     }
 
     private suspend fun postBridge(path: String, json: String): String = withContext(Dispatchers.IO) {
-        val url = authPrefs.currentBridgeHttpUrl.trimEnd('/') + path
         val body = json.toRequestBody("application/json".toMediaType())
-        val req = Request.Builder().url(url)
-            .addHeader(authPrefs.bridgeAuthHeader, authPrefs.bridgeAuthToken)
-            .post(body).build()
-        http.newCall(req).execute().use { it.body()?.string() ?: "" }
+        val req = Request.Builder().url(url(path)).post(body).build()
+        bridge.client.newCall(req).execute().use { it.body?.string().orEmpty() }
     }
 
     private suspend fun getBridge(path: String): String = withContext(Dispatchers.IO) {
-        val url = authPrefs.currentBridgeHttpUrl.trimEnd('/') + path
-        val req = Request.Builder().url(url)
-            .addHeader(authPrefs.bridgeAuthHeader, authPrefs.bridgeAuthToken)
-            .get().build()
-        http.newCall(req).execute().use { it.body()?.string() ?: "" }
+        val req = Request.Builder().url(url(path)).get().build()
+        bridge.client.newCall(req).execute().use { it.body?.string().orEmpty() }
     }
 
     private fun appendMessage(msg: ChatMessage) {
@@ -279,7 +262,7 @@ class HermesChatBackend(
 
     private fun updateConversation(conv: Conversation) {
         _conversations.value = _conversations.value.map { if (it.id == conv.id) conv else it }
-        if (store.currentConversation.value?.id == conv.id) store.setCurrentConversation(conv)
+        if (store.currentConversation.value?.id == conv.id) store.currentConversation.value = conv
     }
 
     // ── WebSocket listener ────────────────────────────────────────────────────
